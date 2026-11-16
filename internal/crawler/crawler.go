@@ -20,6 +20,8 @@ type Crawler struct {
 	MaxURLs int
 	// MaxDepth bounds sitemap index nesting (default 5).
 	MaxDepth int
+	// Workers bounds how many sitemaps are fetched concurrently (default 8).
+	Workers int
 	// TrySitemapFallback fetches /sitemap.xml when robots.txt lists none (default true).
 	TrySitemapFallback *bool
 }
@@ -36,6 +38,13 @@ type Result struct {
 	Retryable bool
 }
 
+// sitemapResult is the outcome of fetching one sitemap in parallel.
+type sitemapResult struct {
+	pageURLs []index.URL
+	nested   []string
+	err      error
+}
+
 func (c *Crawler) defaults() {
 	if c.Fetcher == nil {
 		c.Fetcher = NewFetcher()
@@ -48,6 +57,9 @@ func (c *Crawler) defaults() {
 	}
 	if c.MaxDepth <= 0 {
 		c.MaxDepth = 5
+	}
+	if c.Workers <= 0 {
+		c.Workers = 8
 	}
 }
 
@@ -107,6 +119,36 @@ func (c *Crawler) Crawl(ctx context.Context, domain string, store *index.SQLiteS
 	}
 
 	var pages []index.URL
+
+	// limitHit records the first truncation reason and reports whether the
+	// crawl must stop.
+	limitHit := func() bool {
+		switch {
+		case ctx.Err() != nil:
+			if res.Truncated == "" {
+				res.Truncated = "the crawl ran out of time"
+			}
+		case res.SitemapsFetched >= c.MaxSitemaps:
+			if res.Truncated == "" {
+				res.Truncated = fmt.Sprintf("only the first %d sitemaps were read", c.MaxSitemaps)
+			}
+		case len(pages) >= c.MaxURLs:
+			if res.Truncated == "" {
+				res.Truncated = fmt.Sprintf("only the first %d URLs were kept", c.MaxURLs)
+			}
+		default:
+			return false
+		}
+		return true
+	}
+
+	// batchResult pairs a sitemap batch slot with its fetch outcome so
+	// results can be merged in queue order regardless of completion order.
+	type batchResult struct {
+		idx int
+		res sitemapResult
+	}
+
 crawl:
 	for depth := 1; len(queue) > 0; depth++ {
 		if depth > c.MaxDepth {
@@ -116,61 +158,92 @@ crawl:
 			break
 		}
 		var next []string
-		for _, sitemapURL := range queue {
-			switch {
-			case ctx.Err() != nil:
-				if res.Truncated == "" {
-					res.Truncated = "the crawl ran out of time"
-				}
-				break crawl
-			case res.SitemapsFetched >= c.MaxSitemaps:
-				if res.Truncated == "" {
-					res.Truncated = fmt.Sprintf("only the first %d sitemaps were read", c.MaxSitemaps)
-				}
-				break crawl
-			case len(pages) >= c.MaxURLs:
-				if res.Truncated == "" {
-					res.Truncated = fmt.Sprintf("only the first %d URLs were kept", c.MaxURLs)
-				}
+		for len(queue) > 0 {
+			if limitHit() {
 				break crawl
 			}
 
-			pageURLs, nested, err := c.Fetcher.FetchSitemap(ctx, sitemapURL)
-			if err != nil {
-				if Transient(err) {
-					transient = true
-				}
-				sitemapErrors++
-				res.Errors = append(res.Errors, err.Error())
-				continue
+			// Fetch the next batch of sitemaps concurrently. Results are
+			// merged in queue order so which sitemaps are read, and the
+			// truncation messages, stay deterministic.
+			batch := queue
+			if len(batch) > c.Workers {
+				batch = batch[:c.Workers]
 			}
-			res.SitemapsFetched++
+			if rem := c.MaxSitemaps - res.SitemapsFetched; len(batch) > rem {
+				batch = batch[:rem]
+			}
+			queue = queue[len(batch):]
 
-			for _, page := range pageURLs {
-				if !sameSite(site, page.Domain) {
-					continue
-				}
-				if len(pages) >= c.MaxURLs {
+			// Workers report through a buffered channel, so a canceled
+			// context can abort the wait immediately: the doomed requests
+			// fail as the context cancels, and their results are dropped.
+			completions := make(chan batchResult, len(batch))
+			for i, sitemapURL := range batch {
+				go func(i int, sitemapURL string) {
+					pageURLs, nested, err := c.Fetcher.FetchSitemap(ctx, sitemapURL)
+					completions <- batchResult{
+						idx: i,
+						res: sitemapResult{pageURLs: pageURLs, nested: nested, err: err},
+					}
+				}(i, sitemapURL)
+			}
+
+			results := make([]sitemapResult, len(batch))
+			for got := 0; got < len(batch); got++ {
+				select {
+				case br := <-completions:
+					results[br.idx] = br.res
+				case <-ctx.Done():
 					if res.Truncated == "" {
-						res.Truncated = fmt.Sprintf("only the first %d URLs were kept", c.MaxURLs)
+						res.Truncated = "the crawl ran out of time"
 					}
 					break crawl
 				}
-				pages = append(pages, page)
 			}
 
-			for _, ns := range nested {
-				if ns == "" || seen[ns] || !sitemapAllowed(site, ns) {
+			for i := range results {
+				if limitHit() {
+					break crawl
+				}
+				r := &results[i]
+
+				if r.err != nil {
+					if Transient(r.err) {
+						transient = true
+					}
+					sitemapErrors++
+					res.Errors = append(res.Errors, r.err.Error())
 					continue
 				}
-				if len(seen) >= queueCap {
-					if res.Truncated == "" {
-						res.Truncated = fmt.Sprintf("only the first %d sitemap URLs were considered", queueCap)
+				res.SitemapsFetched++
+
+				for _, page := range r.pageURLs {
+					if !sameSite(site, page.Domain) {
+						continue
 					}
-					break
+					if len(pages) >= c.MaxURLs {
+						if res.Truncated == "" {
+							res.Truncated = fmt.Sprintf("only the first %d URLs were kept", c.MaxURLs)
+						}
+						break crawl
+					}
+					pages = append(pages, page)
 				}
-				seen[ns] = true
-				next = append(next, ns)
+
+				for _, ns := range r.nested {
+					if ns == "" || seen[ns] || !sitemapAllowed(site, ns) {
+						continue
+					}
+					if len(seen) >= queueCap {
+						if res.Truncated == "" {
+							res.Truncated = fmt.Sprintf("only the first %d sitemap URLs were considered", queueCap)
+						}
+						break
+					}
+					seen[ns] = true
+					next = append(next, ns)
+				}
 			}
 		}
 		queue = next

@@ -24,7 +24,7 @@ type Fetcher struct {
 	Client *nethttp.Client
 	// UserAgent is sent with every request. If empty, defaultUserAgent is used.
 	UserAgent string
-	// MaxBodySize bounds response bodies (default 10 MiB).
+	// MaxBodySize bounds response bodies. If <= 0, no limit is applied.
 	MaxBodySize int64
 	// Scheme is used to construct URLs when BaseURL is not set (default https).
 	Scheme string
@@ -38,14 +38,14 @@ func NewFetcher() *Fetcher {
 		Client: &nethttp.Client{
 			Timeout: 20 * time.Second,
 		},
-		UserAgent:   defaultUserAgent,
-		MaxBodySize: 10 << 20,
+		UserAgent: defaultUserAgent,
 	}
 }
 
+// maxBodySize returns the configured body bound, or 0 for no limit.
 func (f *Fetcher) maxBodySize() int64 {
 	if f.MaxBodySize <= 0 {
-		return 10 << 20
+		return 0
 	}
 	return f.MaxBodySize
 }
@@ -142,11 +142,11 @@ func (f *Fetcher) Get(ctx context.Context, rawURL string) ([]byte, error) {
 		return nil, &StatusError{URL: rawURL, Code: resp.StatusCode, Status: resp.Status}
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+	body, err := readBody(resp.Body, max)
 	if err != nil {
 		return nil, &FetchError{URL: rawURL, Err: fmt.Errorf("read body: %w", err)}
 	}
-	if int64(len(body)) > max {
+	if max > 0 && int64(len(body)) > max {
 		return nil, fmt.Errorf("GET %s: body exceeds %d bytes", rawURL, max)
 	}
 
@@ -158,16 +158,24 @@ func (f *Fetcher) Get(ctx context.Context, rawURL string) ([]byte, error) {
 		}
 		defer zr.Close()
 
-		body, err = io.ReadAll(io.LimitReader(zr, max+1))
+		body, err = readBody(zr, max)
 		if err != nil {
 			return nil, fmt.Errorf("gunzip read %s: %w", rawURL, err)
 		}
-		if int64(len(body)) > max {
+		if max > 0 && int64(len(body)) > max {
 			return nil, fmt.Errorf("GET %s: decompressed body exceeds %d bytes", rawURL, max)
 		}
 	}
 
 	return body, nil
+}
+
+// readBody reads r fully, bounding the result to max bytes when max > 0.
+func readBody(r io.Reader, max int64) ([]byte, error) {
+	if max <= 0 {
+		return io.ReadAll(r)
+	}
+	return io.ReadAll(io.LimitReader(r, max+1))
 }
 
 // FetchRobots returns the absolute Sitemap URLs from domain's robots.txt.
