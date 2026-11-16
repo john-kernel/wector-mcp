@@ -16,7 +16,7 @@ type Crawler struct {
 	Fetcher *Fetcher
 	// MaxSitemaps bounds sitemaps fetched (default 50).
 	MaxSitemaps int
-	// MaxURLs bounds page URLs collected (default 10000).
+	// MaxURLs bounds page URLs collected (default 200000).
 	MaxURLs int
 	// MaxDepth bounds sitemap index nesting (default 5).
 	MaxDepth int
@@ -53,7 +53,7 @@ func (c *Crawler) defaults() {
 		c.MaxSitemaps = 50
 	}
 	if c.MaxURLs <= 0 {
-		c.MaxURLs = 10000
+		c.MaxURLs = 200000
 	}
 	if c.MaxDepth <= 0 {
 		c.MaxDepth = 5

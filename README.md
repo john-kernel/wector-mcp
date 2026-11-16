@@ -50,14 +50,52 @@ site has no sitemap (fall back to web search) or the keywords did not match.
 ## How results are ranked
 
 Only the words in a URL are searched. Keywords are extracted from each path:
-camelCase is split, and page extensions, stopwords, hashes and long numeric IDs
-are dropped. A query matches whole words and word prefixes, and plurals match
-singulars.
+camelCase and acronyms are split (`HTMLInputElement` is `html input element`),
+and page extensions, stopwords, hashes and long numeric IDs are dropped.
 
-Each result's score combines how many of the query terms the URL contains
-(60%), SQLite FTS5 bm25 relevance (30%) and how shallow the path is (10%).
-Translations of the same page (`/docs/x`, `/fr/docs/x`) are collapsed into the
-best-ranked one.
+A query term matches a word of the URL when it is, from best to worst:
+
+- the same word, or its plural or singular;
+- the same words joined or split differently (`config map` and `configmap`,
+  `cronjob` and `cron-jobs`);
+- another inflection (`installing`, `installed` and `installation` all match
+  `install`);
+- the start of a longer word (`auth` matches `authentication`);
+- abbreviated in the URL (`parameters` matches `params`);
+- misspelled (`controler` matches `controller`), which is only tried for a
+  term the site does not have as a word.
+
+Each result's score combines:
+
+- **Coverage (60%)**: how much of the query the URL contains. Terms that are
+  rare on the indexed sites count for more than common ones, and a term from
+  the site's own name counts for little. A match in the last path segment,
+  which names the page, counts in full; one in an earlier segment for 90%, and
+  one in the domain for half.
+- **Focus (20%)**: how much of the last path segment the query accounts for,
+  so `/concepts/ingress` beats `/concepts/ingress-controllers` for `ingress`.
+- **Proximity (15%)**: whether terms that are neighbors in the query are
+  neighbors in the URL too.
+- **Depth (5%)**: how shallow the path is.
+
+Pages that contain every term are considered first; pages missing some terms
+only fill in when there are too few of those.
+
+A page published in several languages or versions (`/docs/x`, `/fr/docs/x`,
+`/en/5.2/x`, `/en/dev/x`) is one result. The URL returned is the one in your
+language (see below), then the version named in the query if there is one
+(`modelforms 4.2`), then the newest: `latest`, `stable` or no version at all,
+then the highest release number, then `dev` and the like. A version is a path
+segment with a dotted or `v`-prefixed number, or one of those names.
+
+A tenth of the score is kept for language: URLs in your language get 0.10
+(0.11 when the region matches too, as in `/en-us/` for `en_US`), and URLs in
+another language get nothing. URLs without a locale get the same 0.10 if your
+language is English and half of it otherwise.
+
+Your locale is read at startup from `LANGUAGE`, `LC_ALL`, `LC_MESSAGES` and
+`LANG`, in that order; set `WECTOR_LOCALE` (e.g. `pt_BR`) to override them.
+English is assumed when none of them names a language.
 
 ## Storage
 
@@ -72,7 +110,7 @@ between sessions that run at the same time.
 
 ## Limits
 
-- A crawl reads at most 50 sitemaps and 10,000 URLs per site, considers at
+- A crawl reads at most 50 sitemaps and 200,000 URLs per site, considers at
   most 1,000 sitemap locations, and gives up after 90 seconds.
 - Sites without a sitemap cannot be indexed.
 - Ports are not kept, so sites served on a non-default port are not supported.

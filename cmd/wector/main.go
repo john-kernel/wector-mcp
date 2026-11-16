@@ -225,6 +225,8 @@ func run() error {
 		}
 	}()
 
+	sess.store.Locale = userLocale()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

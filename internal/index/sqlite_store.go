@@ -34,6 +34,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS urls_fts USING fts5(
 	tokenize = 'unicode61 remove_diacritics 2'
 );
 
+-- Per-word document counts of urls_fts, for weighing and correcting query terms.
+CREATE VIRTUAL TABLE IF NOT EXISTS urls_vocab USING fts5vocab(urls_fts, 'row');
+
 CREATE TRIGGER IF NOT EXISTS urls_ai AFTER INSERT ON urls BEGIN
 	INSERT INTO urls_fts (rowid, domain, segments, keywords)
 	VALUES (new.id, new.domain, new.segments, new.keywords);
@@ -47,6 +50,10 @@ END;
 
 type SQLiteStore struct {
 	db *sql.DB
+
+	// Locale is the user's locale; Search favors pages that match it. The
+	// zero value means English.
+	Locale Locale
 }
 
 func NewSQLiteStore(path string) (*SQLiteStore, error) {
