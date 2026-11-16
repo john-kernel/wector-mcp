@@ -1,4 +1,4 @@
-package utils
+package index
 
 import (
 	"context"
@@ -11,8 +11,7 @@ import (
 )
 
 const (
-	// DefaultSearchLimit is the number of results returned when the caller
-	// does not ask for a specific amount.
+	// DefaultSearchLimit is the number of results returned by default.
 	DefaultSearchLimit = 10
 	// MaxSearchLimit caps the number of results a single search can return.
 	MaxSearchLimit = 50
@@ -20,22 +19,17 @@ const (
 	// candidatePool is how many FTS matches are pulled for re-ranking.
 	candidatePool = 300
 
-	// bm25 column weights for urls_fts (domain, segments, keywords). Curated
-	// keywords count most; raw segments still match joined forms such as
-	// "javascript" that keyword extraction splits apart.
+	// bm25 column weights for urls_fts (domain, segments, keywords).
 	weightDomain   = 1.5
 	weightSegments = 1.0
 	weightKeywords = 2.0
 
-	// Final score mix. Coverage (how many query terms a URL matches)
-	// dominates, bm25 separates URLs with equal coverage, and shallow paths
-	// get a small boost because they tend to be the canonical page on a topic.
+	// Final score mix.
 	mixCoverage = 0.6
 	mixBM25     = 0.3
 	mixDepth    = 0.1
 
-	// prefixMatchCredit is the coverage a term earns for matching only the
-	// start of a word ("doc" in "docs") instead of the whole word.
+	// prefixMatchCredit is the coverage for matching only the start of a word.
 	prefixMatchCredit = 0.7
 	// minPrefixLen is the shortest term that is allowed to prefix-match.
 	minPrefixLen = 3
@@ -57,11 +51,6 @@ type candidate struct {
 }
 
 // Search returns the stored URLs that best match query, best first.
-//
-// query is free text and may contain a "site:example.com" operator; domain,
-// when non-empty, restricts results the same way and takes precedence. A
-// site restriction covers the host and its subdomains. With a site but no
-// search terms, the site's shallowest URLs are returned.
 func (s *SQLiteStore) Search(ctx context.Context, query, domain string, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = DefaultSearchLimit
@@ -122,8 +111,7 @@ func (s *SQLiteStore) Search(ctx context.Context, query, domain string, limit in
 	return results, nil
 }
 
-// browseSite lists a site's URLs, shallowest first, for queries that name a
-// site but no search terms.
+// browseSite lists a site's URLs, shallowest first.
 func (s *SQLiteStore) browseSite(ctx context.Context, site string, limit int) ([]SearchResult, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT scheme, domain, path FROM urls
@@ -150,10 +138,7 @@ func (s *SQLiteStore) browseSite(ctx context.Context, site string, limit int) ([
 	return results, rows.Err()
 }
 
-// matchExpr builds the FTS5 MATCH expression for terms: any term may match
-// (ranking rewards matching more of them), and terms long enough are matched
-// as prefixes of their stem so plurals and longer word forms are found.
-// Terms contain only letters and digits, so quoting them is always safe.
+// matchExpr builds the FTS5 MATCH expression for terms.
 func matchExpr(terms []string) string {
 	parts := make([]string, 0, len(terms))
 	for _, term := range terms {
@@ -162,6 +147,9 @@ func matchExpr(terms []string) string {
 			parts = append(parts, `"`+st+`"*`)
 		} else {
 			parts = append(parts, `"`+term+`"`)
+		}
+		if p := iesPlural(term); p != "" {
+			parts = append(parts, `"`+p+`"`)
 		}
 	}
 	return strings.Join(parts, " OR ")
@@ -180,7 +168,7 @@ func rank(terms []string, candidates []candidate) []SearchResult {
 	}
 	scored := make([]scoredResult, 0, len(candidates))
 
-	// bm25 is negative, more negative being better; normalize to (0, 1].
+	// bm25 is negative; normalize to (0, 1].
 	best := 0.0
 	for _, c := range candidates {
 		best = math.Max(best, -c.bm25)
@@ -200,8 +188,7 @@ func rank(terms []string, candidates []candidate) []SearchResult {
 				matched = append(matched, term)
 			}
 		}
-		// FTS folds diacritics and may match where the comparison above does
-		// not; every candidate matched at least one term.
+		// Every candidate matched at least one term.
 		if credit == 0 {
 			credit = prefixMatchCredit
 		}
@@ -235,8 +222,7 @@ func rank(terms []string, candidates []candidate) []SearchResult {
 		return a.URL < b.URL
 	})
 
-	// Keep only the best-ranked URL of each page, so translations of one
-	// page (/docs/x, /fr/docs/x, /ja/docs/x) do not crowd out other pages.
+	// Keep only the best-ranked URL of each page (e.g. translations).
 	seen := make(map[string]struct{}, len(scored))
 	for _, r := range scored {
 		if _, ok := seen[r.pageKey]; ok {
@@ -248,9 +234,7 @@ func rank(terms []string, candidates []candidate) []SearchResult {
 	return results
 }
 
-// stripLocale removes a leading locale segment such as /fr, /pt-br or /zh_CN
-// from path. Paths that differ only in that segment are treated as
-// translations of the same page.
+// stripLocale removes a leading locale segment from path.
 func stripLocale(path string) string {
 	rest := strings.TrimPrefix(path, "/")
 	first, tail, _ := strings.Cut(rest, "/")
@@ -260,26 +244,47 @@ func stripLocale(path string) string {
 	return "/" + tail
 }
 
+// languageCodes holds the ISO 639-1 two-letter language codes.
+var languageCodes = func() map[string]struct{} {
+	const codes = "aa ab ae af ak am an ar as av ay az ba be bg bh bi bm bn bo br bs " +
+		"ca ce ch co cr cs cu cv cy da de dv dz ee el en eo es et eu fa ff fi fj fo fr fy " +
+		"ga gd gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik io is it iu ja jv " +
+		"ka kg ki kj kk kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv mg mh mi " +
+		"mk ml mn mr ms mt my na nb nd ne ng nl nn no nr nv ny oc oj om or os pa pi pl ps " +
+		"pt qu rm rn ro ru rw sa sc sd se sg si sk sl sm sn so sq sr ss st su sv sw ta te " +
+		"tg th ti tk tl tn to tr ts tt tw ty ug uk ur uz ve vi vo wa wo xh yi yo za zh zu"
+	m := make(map[string]struct{})
+	for _, c := range strings.Fields(codes) {
+		m[c] = struct{}{}
+	}
+	return m
+}()
+
+// isLocale reports whether segment is a language code, alone or with a subtag.
 func isLocale(segment string) bool {
+	s := strings.ToLower(segment)
 	isAlpha := func(s string) bool {
 		for _, r := range s {
-			if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+			if r < 'a' || r > 'z' {
 				return false
 			}
 		}
 		return true
 	}
-	switch len(segment) {
+	switch len(s) {
 	case 2:
-		return isAlpha(segment)
-	case 5:
-		return isAlpha(segment[:2]) && (segment[2] == '-' || segment[2] == '_') && isAlpha(segment[3:])
+	case 5, 7:
+		if (s[2] != '-' && s[2] != '_') || !isAlpha(s[3:]) {
+			return false
+		}
+	default:
+		return false
 	}
-	return false
+	_, ok := languageCodes[s[:2]]
+	return ok
 }
 
-// termCredit returns how well term is represented in tokens: 1 for a whole
-// word match, prefixMatchCredit for matching the start of a word, 0 for none.
+// termCredit scores how well term is represented in tokens.
 func termCredit(term string, tokens map[string]struct{}) float64 {
 	if _, ok := tokens[term]; ok {
 		return 1
@@ -287,6 +292,11 @@ func termCredit(term string, tokens map[string]struct{}) float64 {
 	st := stem(term)
 	if _, ok := tokens[st]; ok {
 		return 1
+	}
+	if p := iesPlural(term); p != "" {
+		if _, ok := tokens[p]; ok {
+			return 1
+		}
 	}
 	if len([]rune(st)) < minPrefixLen {
 		return 0

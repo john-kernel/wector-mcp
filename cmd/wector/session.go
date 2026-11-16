@@ -10,7 +10,7 @@ import (
 	"strings"
 	"syscall"
 
-	"wector-mcp/utils"
+	"github.com/john-kernel/wector-mcp/internal/index"
 )
 
 const (
@@ -20,7 +20,7 @@ const (
 
 // session owns the URL store for the lifetime of one MCP session.
 type session struct {
-	store *utils.SQLiteStore
+	store *index.SQLiteStore
 	path  string
 	// owned is true when the database file was created for this process and
 	// is deleted at the end; false when the user chose it with $WECTOR_DB,
@@ -36,7 +36,7 @@ type session struct {
 // With $WECTOR_DB set, that file is used instead and emptied on open.
 func openSession() (*session, error) {
 	if path := os.Getenv("WECTOR_DB"); path != "" {
-		store, err := utils.NewSQLiteStore(path)
+		store, err := index.NewSQLiteStore(path)
 		if err != nil {
 			return nil, err
 		}
@@ -59,7 +59,7 @@ func openSession() (*session, error) {
 
 	path := filepath.Join(dir, sessionPrefix+strconv.Itoa(os.Getpid())+sessionSuffix)
 	removeDB(path) // a previous process with a recycled pid
-	store, err := utils.NewSQLiteStore(path)
+	store, err := index.NewSQLiteStore(path)
 	if err != nil {
 		return nil, err
 	}

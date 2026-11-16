@@ -1,11 +1,11 @@
-// Package http fetches robots.txt and sitemap documents over HTTP(S) and
-// turns their contents into normalized URLs suitable for the SQLite store.
-package http
+// Package crawler fetches robots.txt and sitemaps over HTTP(S) and normalizes their URLs.
+package crawler
 
 import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	nethttp "net/http"
@@ -13,26 +13,22 @@ import (
 	"strings"
 	"time"
 
-	"wector-mcp/utils"
+	"github.com/john-kernel/wector-mcp/internal/index"
 )
 
 const defaultUserAgent = "wector/1.0 (+sitemap fetcher)"
 
-// Fetcher is a small, bounded HTTP client for retrieving robots.txt and
-// sitemap documents.
+// Fetcher retrieves robots.txt and sitemap documents.
 type Fetcher struct {
 	// Client performs requests. If nil, a client with a 20s timeout is used.
 	Client *nethttp.Client
 	// UserAgent is sent with every request. If empty, defaultUserAgent is used.
 	UserAgent string
-	// MaxBodySize bounds both compressed and decompressed response bodies.
-	// If <= 0, 10 MiB is used.
+	// MaxBodySize bounds response bodies (default 10 MiB).
 	MaxBodySize int64
-	// Scheme is used to construct robots.txt and fallback sitemap URLs when
-	// BaseURL is not set. If empty, "https" is used.
+	// Scheme is used to construct URLs when BaseURL is not set (default https).
 	Scheme string
-	// BaseURL, when set, overrides the origin used for robots.txt and fallback
-	// sitemap URLs. It is useful for tests and proxies.
+	// BaseURL overrides the origin for robots.txt and fallback sitemap URLs.
 	BaseURL string
 }
 
@@ -75,8 +71,7 @@ func (f *Fetcher) scheme() string {
 	return f.Scheme
 }
 
-// originURL returns the base URL used to locate robots.txt and the fallback
-// sitemap for a domain, honoring BaseURL when configured.
+// originURL returns the base URL for robots.txt and the fallback sitemap.
 func (f *Fetcher) originURL(domain string) *neturl.URL {
 	if f.BaseURL != "" {
 		if u, err := neturl.Parse(f.BaseURL); err == nil {
@@ -86,8 +81,7 @@ func (f *Fetcher) originURL(domain string) *neturl.URL {
 	return &neturl.URL{Scheme: f.scheme(), Host: domain}
 }
 
-// FallbackSitemapURL returns the conventional sitemap URL for a domain,
-// honoring any BaseURL override.
+// FallbackSitemapURL returns the /sitemap.xml URL for a domain.
 func (f *Fetcher) FallbackSitemapURL(domain string) string {
 	u := f.originURL(domain)
 	u.Path = "/sitemap.xml"
@@ -96,10 +90,38 @@ func (f *Fetcher) FallbackSitemapURL(domain string) string {
 	return u.String()
 }
 
-// Get retrieves a URL and returns its response body. It follows redirects,
-// rejects non-2xx responses, bounds the body size, and transparently
-// decompresses gzip data whether it was announced via Content-Encoding or
-// only detectable from the gzip magic bytes.
+// FetchError is returned when a request fails before a complete response arrives.
+type FetchError struct {
+	URL string
+	Err error
+}
+
+func (e *FetchError) Error() string { return fmt.Sprintf("GET %s: %v", e.URL, e.Err) }
+func (e *FetchError) Unwrap() error { return e.Err }
+
+// StatusError is returned by Get for a non-2xx response.
+type StatusError struct {
+	URL    string
+	Code   int
+	Status string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("GET %s: unexpected status %s", e.URL, e.Status)
+}
+
+// Transient reports whether err is likely to clear on a later attempt.
+func Transient(err error) bool {
+	var se *StatusError
+	if errors.As(err, &se) {
+		return se.Code == nethttp.StatusRequestTimeout ||
+			se.Code == nethttp.StatusTooManyRequests || se.Code >= 500
+	}
+	var fe *FetchError
+	return errors.As(err, &fe)
+}
+
+// Get retrieves a URL, rejects non-2xx responses, bounds size, and decompresses gzip.
 func (f *Fetcher) Get(ctx context.Context, rawURL string) ([]byte, error) {
 	max := f.maxBodySize()
 
@@ -112,24 +134,23 @@ func (f *Fetcher) Get(ctx context.Context, rawURL string) ([]byte, error) {
 
 	resp, err := f.client().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", rawURL, err)
+		return nil, &FetchError{URL: rawURL, Err: err}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("GET %s: unexpected status %s", rawURL, resp.Status)
+		return nil, &StatusError{URL: rawURL, Code: resp.StatusCode, Status: resp.Status}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", rawURL, err)
+		return nil, &FetchError{URL: rawURL, Err: fmt.Errorf("read body: %w", err)}
 	}
 	if int64(len(body)) > max {
 		return nil, fmt.Errorf("GET %s: body exceeds %d bytes", rawURL, max)
 	}
 
-	// net/http already decompresses Content-Encoding: gzip, but some servers
-	// serve *.xml.gz files without that header. Sniff for the gzip magic bytes.
+	// Some servers serve gzipped *.xml.gz without Content-Encoding; sniff the magic bytes.
 	if len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b {
 		zr, err := gzip.NewReader(bytes.NewReader(body))
 		if err != nil {
@@ -149,9 +170,7 @@ func (f *Fetcher) Get(ctx context.Context, rawURL string) ([]byte, error) {
 	return body, nil
 }
 
-// FetchRobots retrieves the robots.txt for domain and returns the Sitemap
-// directives it contains, resolved to absolute URLs. The request origin honors
-// BaseURL when set, otherwise uses Scheme (default https) and domain.
+// FetchRobots returns the absolute Sitemap URLs from domain's robots.txt.
 func (f *Fetcher) FetchRobots(ctx context.Context, domain string) ([]string, error) {
 	base := f.originURL(domain)
 	base.Path = "/robots.txt"
@@ -162,7 +181,7 @@ func (f *Fetcher) FetchRobots(ctx context.Context, domain string) ([]string, err
 		return nil, err
 	}
 
-	sitemaps := utils.ParseRobots(body)
+	sitemaps := index.ParseRobots(body)
 	out := make([]string, 0, len(sitemaps))
 	for _, s := range sitemaps {
 		if resolved := resolveRef(base, s); resolved != "" {
@@ -172,16 +191,14 @@ func (f *Fetcher) FetchRobots(ctx context.Context, domain string) ([]string, err
 	return out, nil
 }
 
-// FetchSitemap retrieves and parses a sitemap URL. It returns normalized page
-// URLs and absolute nested sitemap URLs. Relative loc values are resolved
-// against the sitemap URL itself.
-func (f *Fetcher) FetchSitemap(ctx context.Context, rawURL string) ([]utils.URL, []string, error) {
+// FetchSitemap parses a sitemap into normalized page URLs and nested sitemap URLs.
+func (f *Fetcher) FetchSitemap(ctx context.Context, rawURL string) ([]index.URL, []string, error) {
 	body, err := f.Get(ctx, rawURL)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	pageLocs, sitemapLocs, err := utils.ParseSitemap(body)
+	pageLocs, sitemapLocs, err := index.ParseSitemap(body)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse %s: %w", rawURL, err)
 	}
@@ -191,13 +208,13 @@ func (f *Fetcher) FetchSitemap(ctx context.Context, rawURL string) ([]utils.URL,
 		return nil, nil, fmt.Errorf("parse sitemap url %q: %w", rawURL, err)
 	}
 
-	pages := make([]utils.URL, 0, len(pageLocs))
+	pages := make([]index.URL, 0, len(pageLocs))
 	for _, loc := range pageLocs {
 		resolved := resolveRef(base, loc)
 		if resolved == "" {
 			continue
 		}
-		page, err := utils.ParsePageURL(resolved)
+		page, err := index.ParsePageURL(resolved)
 		if err != nil {
 			continue
 		}

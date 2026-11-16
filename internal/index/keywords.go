@@ -1,12 +1,11 @@
-package utils
+package index
 
 import (
 	"strings"
 	"unicode"
 )
 
-// stopwords carry no search signal in a URL path or a query. "index" is here
-// because /docs/index.html says nothing beyond /docs.
+// stopwords carry no search signal in a URL path or a query.
 var stopwords = map[string]struct{}{
 	"a": {}, "an": {}, "and": {}, "are": {}, "as": {}, "at": {}, "be": {},
 	"by": {}, "for": {}, "from": {}, "how": {}, "in": {}, "index": {},
@@ -14,8 +13,7 @@ var stopwords = map[string]struct{}{
 	"this": {}, "to": {}, "was": {}, "what": {}, "with": {},
 }
 
-// pageExtensions are file extensions that describe how a page is served
-// rather than what it is about. Content types such as pdf are kept.
+// pageExtensions describe how a page is served; content types like pdf are kept.
 var pageExtensions = map[string]struct{}{
 	"html": {}, "htm": {}, "xhtml": {}, "shtml": {}, "php": {}, "asp": {},
 	"aspx": {}, "jsp": {}, "cfm": {},
@@ -24,9 +22,7 @@ var pageExtensions = map[string]struct{}{
 // maxQueryTerms bounds the size of the FTS expression built from a query.
 const maxQueryTerms = 16
 
-// tokenize lower-cases s and splits it on anything that is not a letter or
-// digit. With splitCamel, a lower-to-upper transition also starts a new
-// token, so "getUserName" yields get, user, name.
+// tokenize splits s into lower-cased alphanumeric tokens.
 func tokenize(s string, splitCamel bool) []string {
 	var (
 		out  []string
@@ -59,9 +55,7 @@ func isStopword(token string) bool {
 	return ok
 }
 
-// isNoise reports whether a path token is an opaque identifier rather than a
-// word: a single letter, a long number (short ones are kept, since years and
-// versions are meaningful), or a hex hash.
+// isNoise reports whether a token is an opaque identifier.
 func isNoise(token string) bool {
 	runes := []rune(token)
 	if len(runes) == 1 {
@@ -96,9 +90,7 @@ func stripPageExtension(segment string) string {
 	return segment
 }
 
-// ExtractKeywords returns the distinct search keywords found in a URL path,
-// in order of first appearance, joined by spaces. Page extensions, stopwords
-// and opaque identifiers are dropped, and camelCase words are split.
+// ExtractKeywords returns the distinct keywords found in a URL path.
 func ExtractKeywords(path string) string {
 	seen := make(map[string]struct{})
 	var out []string
@@ -128,9 +120,7 @@ type Query struct {
 	Site string
 }
 
-// ParseQuery splits a free-text query into search terms and an optional
-// "site:example.com" restriction. Stopwords are dropped unless the query
-// consists of nothing else.
+// ParseQuery splits a query into terms and an optional site restriction.
 func ParseQuery(raw string) Query {
 	var (
 		q   Query
@@ -167,8 +157,7 @@ func ParseQuery(raw string) Query {
 	return q
 }
 
-// NormalizeSite reduces a host or URL to the key used to identify a site:
-// lower-cased host without scheme, port, path or a leading "www.".
+// NormalizeSite returns the lower-cased host without scheme, port, path, or www.
 func NormalizeSite(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if i := strings.Index(s, "://"); i >= 0 {
@@ -187,8 +176,7 @@ func NormalizeSite(s string) string {
 	return strings.TrimPrefix(s, "www.")
 }
 
-// stem strips common English plural endings so that a query for "widgets"
-// can prefix-match "widget". It is deliberately conservative.
+// stem strips common English plural endings.
 func stem(term string) string {
 	n := len(term)
 	if n < 4 {
@@ -208,4 +196,13 @@ func stem(term string) string {
 		return term[:n-1]
 	}
 	return term
+}
+
+// iesPlural returns the -ies plural of a word ending in a consonant and y.
+func iesPlural(term string) string {
+	n := len(term)
+	if n < 3 || term[n-1] != 'y' || strings.IndexByte("aeiouy", term[n-2]) >= 0 {
+		return ""
+	}
+	return term[:n-1] + "ies"
 }

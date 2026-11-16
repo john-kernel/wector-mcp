@@ -12,11 +12,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	wectorhttp "wector-mcp/http"
-	"wector-mcp/utils"
+	"github.com/john-kernel/wector-mcp/internal/crawler"
+	"github.com/john-kernel/wector-mcp/internal/index"
 )
-
-const cacheTime = 500
 
 const serverVersion = "v1.0.0"
 
@@ -27,8 +25,8 @@ When you know or can guess which site holds the answer, call search_urls with a 
 The index lives for this session only and is discarded when the session ends.`
 
 type app struct {
-	store      *utils.SQLiteStore
-	newCrawler func() *wectorhttp.Crawler
+	store      *index.SQLiteStore
+	newCrawler func() *crawler.Crawler
 }
 
 const crawlTimeout = 90 * time.Second
@@ -36,7 +34,7 @@ const crawlTimeout = 90 * time.Second
 type checkSitestoreOutput struct {
 	Populated bool         `json:"populated" jsonschema:"true if the URL store contains at least one entry"`
 	URLCount  int          `json:"url_count" jsonschema:"number of URLs in the store"`
-	Sites     []utils.Site `json:"sites" jsonschema:"sites that have already been indexed"`
+	Sites     []index.Site `json:"sites" jsonschema:"sites that have already been indexed"`
 }
 
 // checkSitestore builds the check_sitestore handler bound to the given a.store.
@@ -64,6 +62,8 @@ type indexSiteOutput struct {
 	URLsDiscovered  int      `json:"urls_discovered" jsonschema:"number of page URLs found in the sitemaps"`
 	URLsInserted    int      `json:"urls_inserted" jsonschema:"number of URLs that were new to the store"`
 	Errors          []string `json:"errors" jsonschema:"sitemaps that could not be fetched or parsed"`
+	Truncated       string   `json:"truncated,omitempty" jsonschema:"why the crawl stopped before reading every sitemap; the URLs found up to that point were kept"`
+	Retryable       bool     `json:"retryable,omitempty" jsonschema:"true when no sitemap could be read, so the site was not recorded as indexed and a later search tries again"`
 }
 
 // crawlSite indexes domain's robots.txt and sitemaps into a.store.
@@ -79,18 +79,20 @@ func (a *app) crawlSite(ctx context.Context, domain string) (indexSiteOutput, er
 		res.Errors = []string{}
 	}
 	return indexSiteOutput{
-		Domain:          utils.NormalizeSite(domain),
+		Domain:          index.NormalizeSite(domain),
 		SitemapsFetched: res.SitemapsFetched,
 		URLsDiscovered:  res.URLsDiscovered,
 		URLsInserted:    res.URLsInserted,
 		Errors:          res.Errors,
+		Truncated:       res.Truncated,
+		Retryable:       res.Retryable,
 	}, nil
 }
 
 // indexSite builds the index_site handler bound to the given a.store.
 func (a *app) indexSite() mcp.ToolHandlerFor[indexSiteInput, indexSiteOutput] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in indexSiteInput) (*mcp.CallToolResult, indexSiteOutput, error) {
-		if utils.NormalizeSite(in.Domain) == "" {
+		if index.NormalizeSite(in.Domain) == "" {
 			return nil, indexSiteOutput{}, fmt.Errorf("domain is required: pass a host such as docs.python.org")
 		}
 		out, err := a.crawlSite(ctx, in.Domain)
@@ -105,7 +107,7 @@ type searchURLsInput struct {
 }
 
 type searchURLsOutput struct {
-	Results []utils.SearchResult `json:"results" jsonschema:"matching URLs, best first"`
+	Results []index.SearchResult `json:"results" jsonschema:"matching URLs, best first"`
 	Indexed *indexSiteOutput     `json:"indexed,omitempty" jsonschema:"present when the site had to be indexed to answer this search"`
 	Hint    string               `json:"hint,omitempty" jsonschema:"what to try next when there are no results"`
 }
@@ -117,9 +119,9 @@ func (a *app) searchURLs() mcp.ToolHandlerFor[searchURLsInput, searchURLsOutput]
 	return func(ctx context.Context, req *mcp.CallToolRequest, in searchURLsInput) (*mcp.CallToolResult, searchURLsOutput, error) {
 		var out searchURLsOutput
 
-		site := utils.NormalizeSite(in.Domain)
+		site := index.NormalizeSite(in.Domain)
 		if site == "" {
-			site = utils.ParseQuery(in.Query).Site
+			site = index.ParseQuery(in.Query).Site
 		}
 		if site != "" {
 			crawled, err := a.store.SiteCrawled(ctx, site)
@@ -136,7 +138,7 @@ func (a *app) searchURLs() mcp.ToolHandlerFor[searchURLsInput, searchURLsOutput]
 		}
 
 		results, err := a.store.Search(ctx, in.Query, in.Domain, in.Limit)
-		if errors.Is(err, utils.ErrEmptyQuery) {
+		if errors.Is(err, index.ErrEmptyQuery) {
 			return nil, out, fmt.Errorf("nothing to search for: pass keywords in query, a domain, or both")
 		}
 		if err != nil {
@@ -154,9 +156,12 @@ func (a *app) searchURLs() mcp.ToolHandlerFor[searchURLsInput, searchURLsOutput]
 				if err != nil {
 					return nil, out, err
 				}
-				if len(any) == 0 {
+				switch {
+				case len(any) == 0 && out.Indexed != nil && out.Indexed.Retryable:
+					out.Hint = "The sitemaps for " + site + " could not be reached (see indexed.errors); a later search will try again. Use web search for now."
+				case len(any) == 0:
 					out.Hint = "No sitemap URLs could be found for " + site + "; fall back to web search."
-				} else {
+				default:
 					out.Hint = "No URL on " + site + " matches these keywords; try fewer or different keywords."
 				}
 			}
@@ -225,7 +230,7 @@ func run() error {
 
 	server := newServer(&app{
 		store:      sess.store,
-		newCrawler: func() *wectorhttp.Crawler { return &wectorhttp.Crawler{} },
+		newCrawler: func() *crawler.Crawler { return &crawler.Crawler{} },
 	})
 	err = server.Run(ctx, &mcp.StdioTransport{})
 	if ctx.Err() != nil {

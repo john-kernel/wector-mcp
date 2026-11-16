@@ -1,4 +1,4 @@
-module wector-mcp
+module github.com/john-kernel/wector-mcp
 
 go 1.26.0
 

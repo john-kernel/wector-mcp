@@ -14,7 +14,7 @@ and is discarded when the session ends.
 Requires Go 1.26 or newer. No C toolchain is needed.
 
 ```sh
-go build -o wector ./src
+go build -o wector ./cmd/wector
 ```
 
 ## Configure
@@ -72,9 +72,10 @@ between sessions that run at the same time.
 
 ## Limits
 
-- A crawl reads at most 50 sitemaps and 10,000 URLs per site, and gives up
-  after 90 seconds.
+- A crawl reads at most 50 sitemaps and 10,000 URLs per site, considers at
+  most 1,000 sitemap locations, and gives up after 90 seconds.
 - Sites without a sitemap cannot be indexed.
 - Ports are not kept, so sites served on a non-default port are not supported.
 - Sitemap locations come from the site being indexed and are fetched as
-  given, including ones on other hosts.
+  given, including ones on other hosts; locations on localhost or on
+  loopback, private, link-local, or multicast addresses are skipped.

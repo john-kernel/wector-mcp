@@ -1,4 +1,4 @@
-package utils
+package index
 
 import (
 	"context"
@@ -43,13 +43,6 @@ CREATE TRIGGER IF NOT EXISTS urls_ad AFTER DELETE ON urls BEGIN
 	INSERT INTO urls_fts (urls_fts, rowid, domain, segments, keywords)
 	VALUES ('delete', old.id, old.domain, old.segments, old.keywords);
 END;
-
-CREATE TRIGGER IF NOT EXISTS urls_au AFTER UPDATE ON urls BEGIN
-	INSERT INTO urls_fts (urls_fts, rowid, domain, segments, keywords)
-	VALUES ('delete', old.id, old.domain, old.segments, old.keywords);
-	INSERT INTO urls_fts (rowid, domain, segments, keywords)
-	VALUES (new.id, new.domain, new.segments, new.keywords);
-END;
 `
 
 type SQLiteStore struct {
@@ -79,30 +72,11 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 	return &SQLiteStore{db: db}, nil
 }
 
-func (s *SQLiteStore) DB() *sql.DB {
-	return s.db
-}
-
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
-func IsEmpty(db *sql.DB) (bool, error) {
-	var exists bool
-	if err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM urls LIMIT 1)`).Scan(&exists); err != nil {
-		return false, fmt.Errorf("check urls empty: %w", err)
-	}
-	return !exists, nil
-}
-
-func (s *SQLiteStore) IsEmpty() (bool, error) {
-	return IsEmpty(s.db)
-}
-
-// InsertURLs inserts the given URLs in a single transaction. Rows that
-// collide on the (domain, path) unique constraint are skipped, so the same
-// URL can be discovered repeatedly without creating duplicates. The returned
-// count is the number of rows actually inserted.
+// InsertURLs inserts the given URLs in a single transaction, skipping duplicates.
 func (s *SQLiteStore) InsertURLs(ctx context.Context, urls []URL) (int, error) {
 	if len(urls) == 0 {
 		return 0, nil
@@ -156,8 +130,7 @@ type Site struct {
 	CrawledAt int64  `json:"crawled_at"`
 }
 
-// MarkSiteCrawled records that domain has been crawled, so later searches
-// do not fetch its sitemaps again.
+// MarkSiteCrawled records that domain has been crawled.
 func (s *SQLiteStore) MarkSiteCrawled(ctx context.Context, domain string, urlCount int) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO sites (domain, crawled_at, url_count)
@@ -172,16 +145,12 @@ func (s *SQLiteStore) MarkSiteCrawled(ctx context.Context, domain string, urlCou
 	return nil
 }
 
-// SiteCrawled reports whether domain, or a parent domain covering it, has
-// already been crawled.
+// SiteCrawled reports whether domain itself has already been crawled.
 func (s *SQLiteStore) SiteCrawled(ctx context.Context, domain string) (bool, error) {
 	site := NormalizeSite(domain)
 	var crawled bool
 	err := s.db.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM sites
-			WHERE domain = ?1 OR ?1 LIKE '%.' || domain
-		)`, site).Scan(&crawled)
+		SELECT EXISTS (SELECT 1 FROM sites WHERE domain = ?)`, site).Scan(&crawled)
 	if err != nil {
 		return false, fmt.Errorf("check site %s crawled: %w", domain, err)
 	}
