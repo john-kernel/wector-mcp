@@ -4,6 +4,8 @@ An MCP server that finds pages on a website by searching the URLs listed in the
 site's sitemaps, so a model can go straight to the right page instead of
 running a web search.
 
+[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/john-kernel/wector-mcp.git)
+
 The first search of a site reads its `robots.txt` and sitemaps and stores the
 page URLs in an embedded SQLite database. Later searches of that site are
 answered locally, with no web requests. The database belongs to one session
